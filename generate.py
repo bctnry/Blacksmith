@@ -1,29 +1,24 @@
 import torch
 import torch.nn.functional as F
+import tiktoken
 from model import NanoGPT
 
-d_model = 128
-n_heads = 4
-n_layers = 6
-max_seq_len = 256
+d_model = 768
+n_heads = 12
+n_layers = 12
+max_seq_len = 1024
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'device: {device}')
 
-with open('input.txt', 'r') as f:
-    text = f.read()
-print('training data loaded')
-
-chars = sorted(set(text))
-vocab_size = len(chars)
-char_to_id = {c: i for i, c in enumerate(chars)}
-id_to_char = {i: c for i, c in enumerate(chars)}
+Tokenizer = tiktoken.get_encoding('gpt2')
+vocab_size = Tokenizer.n_vocab
 
 model = NanoGPT(vocab_size, d_model, n_heads, n_layers, max_seq_len).to(device)
 model = model.to(torch.bfloat16)
-model.load_state_dict(torch.load('nanogpt_model.pt', map_location=device))
+chkp = torch.load('blacksmith-1_model.pt', map_location=device)
+model.load_state_dict(chkp['model'])
 model.eval()
-
 
 @torch.no_grad()
 def gen_step(model, token_ids, k_caches, v_caches, temperature, pos_offset, top_k):
@@ -42,14 +37,14 @@ def gen_step(model, token_ids, k_caches, v_caches, temperature, pos_offset, top_
 def generate(model, token_ids, n_new_tokens, temperature=1.0, top_k=25):
     token_ids = token_ids.to(device)
     next_token, k_caches, v_caches = gen_step(model, token_ids, None, None, temperature, 0, top_k)
-    print(id_to_char[next_token.item()], end='', flush=True)
+    print(Tokenizer.decode(list(token_ids[0])), end='', flush=True)
     pos = token_ids.shape[1]
     token_ids = torch.cat([token_ids, next_token[None, :]], dim=1)
 
     for _ in range(n_new_tokens):
         next_token, k_caches, v_caches = gen_step(model, next_token[None, :],
                                                    k_caches, v_caches, temperature, pos, top_k)
-        print(id_to_char[next_token.item()], end='', flush=True)
+        print(Tokenizer.decode([next_token.item()]), end='', flush=True)
         token_ids = torch.cat([token_ids, next_token[None, :]], dim=1)
         if k_caches[0].shape[2] >= max_seq_len:
             k_caches = [k[:, :, -max_seq_len:, :] for k in k_caches]
@@ -58,6 +53,6 @@ def generate(model, token_ids, n_new_tokens, temperature=1.0, top_k=25):
     print('')
     return token_ids
 
-
-context = torch.tensor([[char_to_id[c] for c in 'JULIET']])
+context = torch.tensor([Tokenizer.encode('How is this')])
 output_ids = generate(model, context, 500, temperature=1.0, top_k=25)
+
