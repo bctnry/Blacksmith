@@ -72,7 +72,7 @@ class MultiHeadAttention(nn.Module):
         out[..., 1::2] = out_odd
         return out
 
-    def forward(self, x, k_cache=None, v_cache=None, infer=False, pos_offset=0):
+    def forward(self, x, k_cache=None, v_cache=None, infer=False, pos_offset=0, attn_mask=None):
         batch, n_token, d_model = x.shape
         n_heads, d_head = self.n_heads, self.d_head
 
@@ -87,9 +87,28 @@ class MultiHeadAttention(nn.Module):
             K = torch.cat([k_cache, K], dim=2)
             V = torch.cat([v_cache, V], dim=2)
 
-        # Fused attention: never materializes the full (seq, seq) score/weight
-        # matrices,大幅降低 activation memory.
-        out = F.scaled_dot_product_attention(Q, K, V, is_causal=not infer)
+        # attn_mask: (batch, seq) bool, True = real token, False = padding.
+        if infer:
+            # KV cache handles autoregression; only apply padding mask if given.
+            if attn_mask is not None:
+                pad = attn_mask[:, None, None, :].to(Q.dtype)
+                pad = (1.0 - pad) * torch.finfo(Q.dtype).min
+                out = F.scaled_dot_product_attention(Q, K, V, attn_mask=pad)
+            else:
+                out = F.scaled_dot_product_attention(Q, K, V)
+        else:
+            # Training: need causal. If padding mask given, combine with causal.
+            if attn_mask is None:
+                out = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+            else:
+                T = Q.shape[-2]
+                Tk = K.shape[-2]
+                causal = torch.ones(T, Tk, dtype=torch.bool, device=Q.device).tril()
+                causal_add = torch.where(causal, 0.0, torch.finfo(Q.dtype).min)
+                pad = attn_mask[:, None, None, :].to(Q.dtype)
+                pad = (1.0 - pad) * torch.finfo(Q.dtype).min
+                combined = causal_add[None, None, :, :] + pad
+                out = F.scaled_dot_product_attention(Q, K, V, attn_mask=combined)
         out = out.transpose(1, 2).reshape(batch, n_token, n_heads * d_head)
         return self.Wo(out), K, V
 
@@ -102,9 +121,9 @@ class TransformerBlock(nn.Module):
         self.ln2 = nn.LayerNorm(d_model)
         self.ffn = FFN(d_model)
 
-    def forward(self, x, k_cache=None, v_cache=None, infer=False, pos_offset=0):
+    def forward(self, x, k_cache=None, v_cache=None, infer=False, pos_offset=0, attn_mask=None):
         attn, k_new, v_new = self.attn(self.ln1(x), k_cache=k_cache, v_cache=v_cache,
-                                       infer=infer, pos_offset=pos_offset)
+                                       infer=infer, pos_offset=pos_offset, attn_mask=attn_mask)
         x = x + attn
         x = x + self.ffn(self.ln2(x))
         return x, k_new, v_new
@@ -120,13 +139,13 @@ class NanoGPT(nn.Module):
         self.ln_f = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size)
 
-    def forward(self, token_ids, k_cache=None, v_cache=None, infer=False, pos_offset=0):
+    def forward(self, token_ids, k_cache=None, v_cache=None, infer=False, pos_offset=0, attn_mask=None):
         x = self.W_embed[token_ids]
         if not infer:
             # Training path: gradient checkpointing + skip building KV caches
             # to save activation memory.
             for block in self.blocks:
-                x, _, _ = checkpoint(block, x, use_reentrant=False)
+                x, _, _ = checkpoint(block, x, attn_mask=attn_mask, use_reentrant=False)
             x = self.ln_f(x)
             logits = self.head(x)
             return logits, None, None
