@@ -1,5 +1,7 @@
 # Blacksmith
 
+> this location is currently deprecated; for further developments please check [https://github.com/TriusAI/Blacksmith](https://github.com/TriusAI/Blacksmith)
+
 my own AI (Artificial Idiot)...
 
 ## training
