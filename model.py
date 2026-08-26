@@ -88,26 +88,27 @@ class MultiHeadAttention(nn.Module):
             V = torch.cat([v_cache, V], dim=2)
 
         # attn_mask: (batch, seq) bool, True = real token, False = padding.
+        # PyTorch's scaled_dot_product_attention attn_mask convention:
+        #   boolean: True = ALLOWED (attended), False = masked (excluded).
+        # We use the boolean form instead of the additive float form to
+        # avoid bfloat16 overflow (finfo.min + finfo.min = -inf -> NaN).
         if infer:
-            # KV cache handles autoregression; only apply padding mask if given.
             if attn_mask is not None:
-                pad = attn_mask[:, None, None, :].to(Q.dtype)
-                pad = (1.0 - pad) * torch.finfo(Q.dtype).min
+                pad = attn_mask[:, None, None, :].to(torch.bool)
                 out = F.scaled_dot_product_attention(Q, K, V, attn_mask=pad)
             else:
                 out = F.scaled_dot_product_attention(Q, K, V)
         else:
-            # Training: need causal. If padding mask given, combine with causal.
             if attn_mask is None:
                 out = F.scaled_dot_product_attention(Q, K, V, is_causal=True)
             else:
                 T = Q.shape[-2]
                 Tk = K.shape[-2]
                 causal = torch.ones(T, Tk, dtype=torch.bool, device=Q.device).tril()
-                causal_add = torch.where(causal, 0.0, torch.finfo(Q.dtype).min)
-                pad = attn_mask[:, None, None, :].to(Q.dtype)
-                pad = (1.0 - pad) * torch.finfo(Q.dtype).min
-                combined = causal_add[None, None, :, :] + pad
+                pad = attn_mask[:, None, None, :].to(torch.bool)
+                # A key position is attended iff causal allows it (on/below
+                # diagonal) AND it's a real token (not padding).
+                combined = causal[None, None, :, :] & pad
                 out = F.scaled_dot_product_attention(Q, K, V, attn_mask=combined)
         out = out.transpose(1, 2).reshape(batch, n_token, n_heads * d_head)
         return self.Wo(out), K, V

@@ -13,6 +13,7 @@ from transformers import GPT2Tokenizer
 #     <|im_start|>assistant
 #     Blue, when it's sunny and the sun is not blocked by the clouds.<|im_end|>
 
+TokenizerNoIM = GPT2Tokenizer.from_pretrained('gpt2')
 Tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 _additional_token = [
     '<|im_start|>',
